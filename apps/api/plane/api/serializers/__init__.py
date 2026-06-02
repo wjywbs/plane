@@ -54,6 +54,7 @@ from .intake import (
     IntakeIssueUpdateSerializer,
 )
 from .estimate import EstimateSerializer, EstimatePointSerializer
+from .issue_type import IssueTypeCreateUpdateSerializer, IssueTypeSerializer
 from .asset import (
     UserAssetUploadSerializer,
     AssetUpdateSerializer,

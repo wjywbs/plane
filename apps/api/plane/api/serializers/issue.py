@@ -33,6 +33,7 @@ from plane.utils.content_validator import (
 )
 
 from .base import BaseSerializer
+from plane.db.models.issue_type import ProjectIssueType
 from .cycle import CycleLiteSerializer, CycleSerializer
 from .module import ModuleLiteSerializer, ModuleSerializer
 from .state import StateLiteSerializer
@@ -160,6 +161,13 @@ class IssueSerializer(BaseSerializer):
         ):
             raise serializers.ValidationError("Estimate point is not valid please pass a valid estimate_point_id")
 
+        if data.get("type") and not ProjectIssueType.objects.filter(
+            project_id=self.context.get("project_id"),
+            issue_type=data.get("type"),
+            issue_type__is_active=True,
+        ).exists():
+            raise serializers.ValidationError({"type_id": "Type is not valid please pass a valid type_id"})
+
         return data
 
     def create(self, validated_data):
@@ -173,9 +181,12 @@ class IssueSerializer(BaseSerializer):
         issue_type = validated_data.pop("type", None)
 
         if not issue_type:
-            # Get default issue type
-            issue_type = IssueType.objects.filter(project_issue_types__project_id=project_id, is_default=True).first()
-            issue_type = issue_type
+            project_issue_type = (
+                ProjectIssueType.objects.select_related("issue_type")
+                .filter(project_id=project_id, is_default=True, issue_type__is_active=True)
+                .first()
+            )
+            issue_type = project_issue_type.issue_type if project_issue_type else None
 
         issue = Issue.objects.create(**validated_data, project_id=project_id, type=issue_type)
 

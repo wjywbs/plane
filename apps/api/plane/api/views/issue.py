@@ -90,6 +90,7 @@ from .base import BaseAPIView
 from plane.utils.host import base_host
 from plane.utils.issue_relation_mapper import get_actual_relation
 from plane.bgtasks.webhook_task import model_activity
+from plane.utils.filters import CustomPropertyFilterBackend, IssueFilterSet
 from plane.app.permissions import ROLE
 from plane.utils.openapi import (
     work_item_docs,
@@ -263,6 +264,8 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
     permission_classes = [ProjectEntityPermission]
     serializer_class = IssueSerializer
     use_read_replica = True
+    filter_backends = (CustomPropertyFilterBackend,)
+    filterset_class = IssueFilterSet
 
     def get_queryset(self):
         return (
@@ -379,8 +382,11 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                 .values("count")
             )
         )
+        issue_queryset = self.filter_queryset(issue_queryset)
 
-        total_issue_queryset = Issue.issue_objects.filter(project_id=project_id, workspace__slug=slug)
+        total_issue_queryset = self.filter_queryset(
+            Issue.issue_objects.filter(project_id=project_id, workspace__slug=slug)
+        )
 
         # Priority Ordering
         if order_by_param == "priority" or order_by_param == "-priority":

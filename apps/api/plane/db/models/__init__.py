@@ -80,6 +80,12 @@ from .workspace import (
 from .favorite import UserFavorite
 
 from .issue_type import IssueType
+from .issue_property import (
+    IssueProperty,
+    IssuePropertyOption,
+    IssuePropertyValue,
+    IssuePropertyValueItem,
+)
 
 from .recent_visit import UserRecentVisit
 

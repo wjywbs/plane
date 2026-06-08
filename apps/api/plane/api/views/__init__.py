@@ -20,6 +20,13 @@ from .issue_type import (
     IssueTypeListCreateAPIEndpoint,
     IssueTypeSchemaAPIEndpoint,
 )
+from .issue_property import (
+    IssuePropertyDetailAPIEndpoint,
+    IssuePropertyListCreateAPIEndpoint,
+    IssuePropertyOptionDetailAPIEndpoint,
+    IssuePropertyOptionListCreateAPIEndpoint,
+    IssuePropertyValueAPIEndpoint,
+)
 
 from .issue import (
     WorkspaceIssueAPIEndpoint,

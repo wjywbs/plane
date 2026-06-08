@@ -4,17 +4,26 @@
 
 # Python imports
 import json
+import re
+from decimal import Decimal, InvalidOperation
 
 # Django imports
 from django.db.models import Q
 from django.http import QueryDict
+from django.utils.dateparse import parse_date, parse_datetime
 
 # Third party imports
 from django_filters.utils import translate_validation
 from rest_framework import filters
 from rest_framework.exceptions import ValidationError as DRFValidationError
 
+from plane.db.models import IssueProperty, IssuePropertyValueItem
 from plane.utils.exception_logger import log_exception
+
+
+CUSTOM_FIELD_FILTER_PATTERN = re.compile(
+    r"^custom_fields\.(?P<property_id>[0-9a-fA-F-]{36})(?:__(?P<lookup>exact|in|icontains|range|isnull))?$"
+)
 
 
 class ComplexFilterBackend(filters.BaseFilterBackend):
@@ -457,3 +466,134 @@ class ComplexFilterBackend(filters.BaseFilterBackend):
 
     def _is_scalar(self, value):
         return value is None or isinstance(value, (str, int, float, bool))
+
+
+class CustomPropertyFilterBackend(ComplexFilterBackend):
+    def _is_custom_field_filter(self, field):
+        return CUSTOM_FIELD_FILTER_PATTERN.match(field or "")
+
+    def _validate_fields(self, filter_data, view):
+        filterset_class = getattr(view, "filterset_class", None)
+        allowed_fields = set(filterset_class.base_filters.keys()) if filterset_class else None
+        if not allowed_fields:
+            raise DRFValidationError(
+                {
+                    "message": ("Filtering is not enabled for this endpoint (missing filterset_class)"),
+                    "code": "filtering_not_enabled",
+                }
+            )
+
+        for field in self._extract_original_field_names(filter_data):
+            if self._is_custom_field_filter(field):
+                continue
+            if field not in allowed_fields:
+                raise DRFValidationError(
+                    {
+                        "message": f"Filtering on field '{field}' is not allowed",
+                        "code": "invalid_filter_field",
+                    }
+                )
+
+    def _extract_original_field_names(self, filter_data):
+        if isinstance(filter_data, dict):
+            fields = []
+            for key, value in filter_data.items():
+                if key.lower() in ("or", "and", "not"):
+                    if key.lower() == "not":
+                        if isinstance(value, dict):
+                            fields.extend(self._extract_original_field_names(value))
+                    else:
+                        for item in value:
+                            fields.extend(self._extract_original_field_names(item))
+                else:
+                    fields.append(key)
+            return fields
+        return []
+
+    def _build_leaf_q(self, leaf_conditions, view, queryset):
+        custom_conditions = {}
+        normal_conditions = {}
+        for key, value in leaf_conditions.items():
+            if self._is_custom_field_filter(key):
+                custom_conditions[key] = value
+            else:
+                normal_conditions[key] = value
+
+        combined_q = super()._build_leaf_q(normal_conditions, view, queryset) if normal_conditions else Q()
+        for key, value in custom_conditions.items():
+            combined_q &= self._build_custom_field_q(key, value, view)
+        return combined_q
+
+    def _build_custom_field_q(self, field, raw_value, view):
+        match = CUSTOM_FIELD_FILTER_PATTERN.match(field)
+        property_id = match.group("property_id")
+        lookup = match.group("lookup") or "exact"
+        issue_property = IssueProperty.objects.get(id=property_id, project_id=view.project_id, is_active=True)
+
+        issue_ids = self._base_value_item_queryset(issue_property).values("issue_id")
+        if lookup == "isnull":
+            wants_null = str(raw_value).lower() in ("true", "1", "yes")
+            return ~Q(id__in=issue_ids) if wants_null else Q(id__in=issue_ids)
+
+        value_filter = self._get_value_filter(issue_property, lookup, raw_value)
+        return Q(id__in=self._base_value_item_queryset(issue_property).filter(value_filter).values("issue_id"))
+
+    def _base_value_item_queryset(self, issue_property):
+        return IssuePropertyValueItem.objects.filter(
+            property=issue_property,
+            deleted_at__isnull=True,
+            value__deleted_at__isnull=True,
+            property__is_active=True,
+        )
+
+    def _get_value_filter(self, issue_property, lookup, raw_value):
+        if lookup == "in":
+            values = raw_value if isinstance(raw_value, list) else [item for item in str(raw_value).split(",") if item]
+        elif lookup == "range":
+            values = raw_value if isinstance(raw_value, list) else [item for item in str(raw_value).split(",") if item]
+            if len(values) != 2:
+                raise DRFValidationError({"message": "Range filters require exactly two values"})
+        else:
+            values = [raw_value]
+
+        field_name, prepared_values = self._prepare_filter_values(issue_property, values)
+        if lookup == "icontains":
+            return Q(**{f"{field_name}__icontains": prepared_values[0]})
+        if lookup == "in":
+            return Q(**{f"{field_name}__in": prepared_values})
+        if lookup == "range":
+            return Q(**{f"{field_name}__range": prepared_values})
+        return Q(**{field_name: prepared_values[0]})
+
+    def _prepare_filter_values(self, issue_property, values):
+        if issue_property.property_type in {
+            IssueProperty.PropertyType.TEXT,
+            IssueProperty.PropertyType.URL,
+            IssueProperty.PropertyType.EMAIL,
+            IssueProperty.PropertyType.FILE,
+            IssueProperty.PropertyType.FORMULA,
+        }:
+            return "text_value", [str(value) for value in values]
+        if issue_property.property_type == IssueProperty.PropertyType.DECIMAL:
+            try:
+                return "decimal_value", [Decimal(str(value)) for value in values]
+            except (InvalidOperation, TypeError):
+                raise DRFValidationError({"message": "Decimal custom field filter value is invalid"})
+        if issue_property.property_type == IssueProperty.PropertyType.DATETIME:
+            prepared_values = []
+            for value in values:
+                parsed_value = parse_datetime(str(value)) or parse_date(str(value))
+                if parsed_value is None:
+                    raise DRFValidationError({"message": "Datetime custom field filter value is invalid"})
+                prepared_values.append(parsed_value)
+            return "datetime_value", prepared_values
+        if issue_property.property_type == IssueProperty.PropertyType.BOOLEAN:
+            return "boolean_value", [str(value).lower() in ("true", "1", "yes") for value in values]
+        if issue_property.property_type == IssueProperty.PropertyType.OPTION:
+            return "option_id", values
+        if issue_property.property_type == IssueProperty.PropertyType.RELATION:
+            field_name = (
+                "user_id" if issue_property.relation_type == IssueProperty.RelationType.USER else "related_issue_id"
+            )
+            return field_name, values
+        raise DRFValidationError({"message": "Unsupported custom field type"})

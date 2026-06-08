@@ -14,7 +14,17 @@ from rest_framework.response import Response
 # Module imports
 from plane.app.permissions import ProjectAdminPermission, ProjectLitePermission
 from plane.api.serializers import IssueTypeCreateUpdateSerializer, IssueTypeSerializer
-from plane.db.models import EstimatePoint, Issue, IssueType, Label, Project, ProjectMember, State
+from plane.db.models import (
+    EstimatePoint,
+    Issue,
+    IssueProperty,
+    IssuePropertyOption,
+    IssueType,
+    Label,
+    Project,
+    ProjectMember,
+    State,
+)
 from plane.db.models.issue_type import ProjectIssueType
 from .base import BaseAPIView
 
@@ -331,7 +341,7 @@ class IssueTypeSchemaAPIEndpoint(IssueTypeMixin, BaseAPIView):
             "type_description": issue_type.description if issue_type else "",
             "type_logo_props": issue_type.logo_props if issue_type else {},
             "fields": self.get_standard_fields(project, include),
-            "custom_fields": {},
+            "custom_fields": self.get_custom_fields(project, issue_type),
         }
         return Response(response, status=status.HTTP_200_OK)
 
@@ -417,3 +427,47 @@ class IssueTypeSchemaAPIEndpoint(IssueTypeMixin, BaseAPIView):
             }
 
         return fields
+
+    def get_custom_fields(self, project, issue_type):
+        if not issue_type:
+            return {}
+
+        options_by_property = {}
+        for option in IssuePropertyOption.objects.filter(
+            project=project,
+            property__issue_type=issue_type,
+            is_active=True,
+        ).order_by("sort_order", "name"):
+            options_by_property.setdefault(option.property_id, []).append(
+                {
+                    "id": str(option.id),
+                    "name": option.name,
+                    "description": option.description,
+                    "logo_props": option.logo_props,
+                    "is_default": option.is_default,
+                    "parent": str(option.parent_id) if option.parent_id else None,
+                }
+            )
+
+        custom_fields = {}
+        for issue_property in IssueProperty.objects.filter(
+            project=project,
+            issue_type=issue_type,
+            is_active=True,
+        ).order_by("sort_order", "display_name"):
+            custom_fields[issue_property.name] = {
+                "id": str(issue_property.id),
+                "type": issue_property.property_type,
+                "name": issue_property.name,
+                "display_name": issue_property.display_name,
+                "description": issue_property.description,
+                "logo_props": issue_property.logo_props,
+                "required": issue_property.is_required,
+                "is_multi": issue_property.is_multi,
+                "relation_type": issue_property.relation_type,
+                "default_value": issue_property.default_value,
+                "settings": issue_property.settings,
+                "validation_rules": issue_property.validation_rules,
+                "options": options_by_property.get(issue_property.id, []),
+            }
+        return custom_fields

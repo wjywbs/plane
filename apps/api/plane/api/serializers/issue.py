@@ -21,6 +21,7 @@ from plane.db.models import (
     IssueLabel,
     IssueLink,
     IssueRelation,
+    IssuePropertyValue,
     Label,
     ProjectMember,
     State,
@@ -34,6 +35,7 @@ from plane.utils.content_validator import (
 
 from .base import BaseSerializer
 from plane.db.models.issue_type import ProjectIssueType
+from .issue_property import apply_custom_fields, serialize_property_value
 from .cycle import CycleLiteSerializer, CycleSerializer
 from .module import ModuleLiteSerializer, ModuleSerializer
 from .state import StateLiteSerializer
@@ -67,6 +69,7 @@ class IssueSerializer(BaseSerializer):
     type_id = serializers.PrimaryKeyRelatedField(
         source="type", queryset=IssueType.objects.all(), required=False, allow_null=True
     )
+    custom_fields = serializers.JSONField(write_only=True, required=False)
 
     class Meta:
         model = Issue
@@ -171,6 +174,7 @@ class IssueSerializer(BaseSerializer):
         return data
 
     def create(self, validated_data):
+        custom_fields = validated_data.pop("custom_fields", None)
         assignees = validated_data.pop("assignees", None)
         labels = validated_data.pop("labels", None)
 
@@ -254,9 +258,15 @@ class IssueSerializer(BaseSerializer):
             except IntegrityError:
                 pass
 
+        try:
+            apply_custom_fields(issue, custom_fields or {})
+        except serializers.ValidationError:
+            pass
+
         return issue
 
     def update(self, instance, validated_data):
+        custom_fields = validated_data.pop("custom_fields", None)
         assignees = validated_data.pop("assignees", None)
         labels = validated_data.pop("labels", None)
 
@@ -310,7 +320,10 @@ class IssueSerializer(BaseSerializer):
 
         # Time updation occues even when other related models are updated
         instance.updated_at = timezone.now()
-        return super().update(instance, validated_data)
+        instance = super().update(instance, validated_data)
+        if custom_fields is not None or "type" in validated_data:
+            apply_custom_fields(instance, custom_fields or {})
+        return instance
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -341,6 +354,17 @@ class IssueSerializer(BaseSerializer):
                 data["labels"] = [
                     str(label) for label in IssueLabel.objects.filter(issue=instance).values_list("label_id", flat=True)
                 ]
+
+        if "custom_fields" in self.fields:
+            values = (
+                IssuePropertyValue.objects.filter(issue=instance)
+                .select_related("property")
+                .prefetch_related("items")
+                .order_by("property__sort_order", "property__display_name")
+            )
+            data["custom_fields"] = {
+                value.property.name: serialize_property_value(value.property, value.items.all()) for value in values
+            }
 
         return data
 
